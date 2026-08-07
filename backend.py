@@ -56,6 +56,15 @@ def create_vector_store(documents):
 def create_conversation_chain():
     documents = load_documents()
     documents = split_documents(documents)
+
+    if not documents:
+        st.error(
+            "Couldn't extract any text from the uploaded PDF(s). "
+            "This usually happens with scanned PDFs (image-only, no text layer). "
+            "Please try a different PDF with selectable text."
+        )
+        st.stop()
+
     vector_store = create_vector_store(documents)
 
     chat = ChatGroq(model=model_name)
