@@ -1,27 +1,84 @@
+import io
 from pathlib import Path
 
-from langchain_community.document_loaders.pdf import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores.faiss import FAISS
-from langchain_classic.chains import ConversationalRetrievalChain
-from langchain_groq import ChatGroq
-from langchain_classic.memory import ConversationBufferMemory
+import fitz  # PyMuPDF
+import pytesseract
 import streamlit as st
 from dotenv import load_dotenv, find_dotenv
+from langchain_classic.chains import ConversationalRetrievalChain
+from langchain_classic.memory import ConversationBufferMemory
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores.faiss import FAISS
+from langchain_core.documents import Document
+from langchain_groq import ChatGroq
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from PIL import Image
 
 _ = load_dotenv(find_dotenv())
+
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # Available Groq models (free tier, see console.groq.com for the up-to-date list)
 model_name = "llama-3.3-70b-versatile"
 
+# Below this many characters, we treat the page's embedded text layer as
+# "effectively empty" (e.g. a stray header on an otherwise scanned page)
+# and fall back to OCR instead of trusting it.
+MIN_TEXT_LENGTH = 20
 
-def load_documents(session_folder: Path):
+# Higher DPI = better OCR accuracy but slower rendering. 300 is the standard
+# sweet spot for OCR engines like Tesseract.
+OCR_DPI = 300
+
+# Tesseract language packs to use. "por+eng" covers PT-BR and English source
+# documents; extend this if you expect other languages.
+OCR_LANGUAGES = "por+eng"
+
+
+def extract_page_text(page: fitz.Page) -> tuple[str, bool]:
+    """Returns (text, used_ocr) for a single PDF page.
+
+    Tries the page's native text layer first (fast, free, no dependencies).
+    Only falls back to OCR when that layer is missing or too short to be
+    useful -- the signature of a scanned/image-only page.
+    """
+    text = page.get_text().strip()
+    if len(text) >= MIN_TEXT_LENGTH:
+        return text, False
+
+    pixmap = page.get_pixmap(dpi=OCR_DPI)
+    image = Image.open(io.BytesIO(pixmap.tobytes("png")))
+    ocr_text = pytesseract.image_to_string(image, lang=OCR_LANGUAGES)
+    return ocr_text.strip(), True
+
+
+def load_documents(session_folder: Path) -> list[Document]:
     documents = []
+    ocr_page_count = 0
+
     for file in session_folder.glob("*.pdf"):
-        loader = PyPDFLoader(str(file))
-        file_documents = loader.load()
-        documents.extend(file_documents)
+        pdf = fitz.open(file)
+        for page_number, page in enumerate(pdf, start=1):
+            text, used_ocr = extract_page_text(page)
+            if used_ocr:
+                ocr_page_count += 1
+            if not text:
+                continue
+            documents.append(
+                Document(
+                    page_content=text,
+                    metadata={
+                        "source": file.name,
+                        "page": page_number,
+                        "ocr": used_ocr,
+                    },
+                )
+            )
+        pdf.close()
+
+    if ocr_page_count:
+        st.info(f"{ocr_page_count} page(s) required OCR (scanned/image content detected).")
+
     return documents
 
 
@@ -33,7 +90,6 @@ def split_documents(documents):
     )
     documents = recursive_splitter.split_documents(documents)
     for i, doc in enumerate(documents):
-        doc.metadata["source"] = doc.metadata["source"].split("/")[-1]
         doc.metadata["doc_id"] = i
     return documents
 
@@ -56,14 +112,15 @@ def create_vector_store(documents):
 
 
 def create_conversation_chain(session_folder: Path):
-    documents = load_documents(session_folder)
-    documents = split_documents(documents)
+    with st.spinner("Reading PDFs... scanned pages take longer (OCR)."):
+        documents = load_documents(session_folder)
+        documents = split_documents(documents)
 
     if not documents:
         st.error(
-            "Couldn't extract any text from the uploaded PDF(s). "
-            "This usually happens with scanned PDFs (image-only, no text layer). "
-            "Please try a different PDF with selectable text."
+            "Couldn't extract any text from the uploaded PDF(s), even with OCR. "
+            "This can happen with very low-resolution scans, handwritten pages, "
+            "or corrupted files. Please try a clearer PDF."
         )
         st.stop()
 
