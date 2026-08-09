@@ -16,8 +16,6 @@ from PIL import Image
 
 _ = load_dotenv(find_dotenv())
 
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
 # Available Groq models (free tier, see console.groq.com for the up-to-date list)
 model_name = "llama-3.3-70b-versatile"
 
